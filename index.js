@@ -595,7 +595,7 @@ async function run() {
         time: new Date(),
         updated_by,
       };
-      const result = await trackingCollection.insertOne(log);
+      const result = await trackingsCollection.insertOne(log);
       res.send({ success: true, insertedId: result.insertedId });
     });
 

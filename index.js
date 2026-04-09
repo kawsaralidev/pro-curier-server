@@ -11,11 +11,15 @@ const stripe = require("stripe")(process.env.PAYMENT_GETWAY_KEY);
 const app = express();
 const port = process.env.PORT || 3000;
 
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8",
+);
+
+const serviceAccount = JSON.parse(decoded);
+
 // middlewares
 app.use(cors());
 app.use(express.json());
-
-const serviceAccount = require("./firebase-admin-key");
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),

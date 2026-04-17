@@ -714,4 +714,5 @@ app.get("/", (req, res) => {
   res.send("Server is running ");
 });
 
-module.exports = app;
+const serverless = require("serverless-http");
+module.exports = serverless(app);

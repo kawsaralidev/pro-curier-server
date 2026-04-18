@@ -14,19 +14,13 @@ const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
 
 const serviceAccount = JSON.parse(decoded);
 
+// middlewares
+app.use(cors());
+app.use(express.json());
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
-
-// middlewares
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "https://job-portal-514b0.web.app"],
-    credentials: true,
-  }),
-);
-app.options("*", cors());
-app.use(express.json());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lhf2ug2.mongodb.net/?appName=Cluster0`;
 
@@ -652,14 +646,9 @@ async function run() {
     });
 
     app.post("/parcels", async (req, res) => {
-      try {
-        const parcel = req.body;
-        const result = await parcelsCollection.insertOne(parcel);
-        res.send(result);
-      } catch (error) {
-        console.error("Parcel error:", error);
-        res.status(500).send({ message: "Failed to create parcel" });
-      }
+      const parcel = req.body;
+      const result = await parcelsCollection.insertOne(parcel);
+      res.send(result);
     });
 
     app.post("/create-payment-intent", async (req, res) => {

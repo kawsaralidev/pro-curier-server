@@ -18,8 +18,17 @@ const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
 const serviceAccount = JSON.parse(decoded);
 
 // middlewares
-app.use(cors());
 app.use(express.json());
+const cors = require("cors");
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173", // local dev
+      "https://job-portal-514b0.web.app", // your frontend
+    ],
+    credentials: true,
+  }),
+);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),

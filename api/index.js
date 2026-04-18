@@ -1,19 +1,17 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
-
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
-
-const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
+const stripe = require("stripe")(process.env.PAYMENT_GETWAY_KEY);
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Firebase config
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
   "utf8",
 );
+
 const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
@@ -27,13 +25,8 @@ app.use(
     credentials: true,
   }),
 );
-
 app.options("*", cors());
 app.use(express.json());
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lhf2ug2.mongodb.net/?appName=Cluster0`;
 

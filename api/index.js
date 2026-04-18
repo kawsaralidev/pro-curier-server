@@ -1,34 +1,33 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
+
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const dotenv = require("dotenv");
 const admin = require("firebase-admin");
 
-dotenv.config();
-const stripe = require("stripe")(process.env.PAYMENT_GETWAY_KEY);
+const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Firebase config
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
   "utf8",
 );
-
 const serviceAccount = JSON.parse(decoded);
 
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
 // middlewares
-app.use(express.json());
-const cors = require("cors");
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173", // local dev
-      "https://job-portal-514b0.web.app", // your frontend
-    ],
+    origin: ["http://localhost:5173", "https://job-portal-514b0.web.app"],
     credentials: true,
   }),
 );
+app.use(express.json());
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),

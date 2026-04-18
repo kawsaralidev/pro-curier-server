@@ -27,6 +27,7 @@ app.use(
     credentials: true,
   }),
 );
+app.options("*", cors());
 app.use(express.json());
 
 admin.initializeApp({
@@ -657,9 +658,14 @@ async function run() {
     });
 
     app.post("/parcels", async (req, res) => {
-      const parcel = req.body;
-      const result = await parcelsCollection.insertOne(parcel);
-      res.send(result);
+      try {
+        const parcel = req.body;
+        const result = await parcelsCollection.insertOne(parcel);
+        res.send(result);
+      } catch (error) {
+        console.error("Parcel error:", error);
+        res.status(500).send({ message: "Failed to create parcel" });
+      }
     });
 
     app.post("/create-payment-intent", async (req, res) => {

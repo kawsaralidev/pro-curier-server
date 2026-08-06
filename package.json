@@ -2,9 +2,8 @@
   "name": "pro-curier-server",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "api/index.js",
   "scripts": {
-    "test": "node test-all.js",
     "start": "node api/index.js",
     "dev": "node api/index.js"
   },
@@ -19,5 +18,8 @@
     "mongodb": "^7.0.0",
     "serverless-http": "^4.0.0",
     "stripe": "^18.0.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

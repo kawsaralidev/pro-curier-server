@@ -3,39 +3,64 @@ const cors = require("cors");
 require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
+const serverless = require("serverless-http");
 const stripe = require("stripe")(process.env.PAYMENT_GETWAY_KEY);
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
-  "utf8",
-);
-
-const serviceAccount = JSON.parse(decoded);
-
 // middlewares
 app.use(cors());
 app.use(express.json());
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+// --- Firebase Admin (guarded: serverless cold starts must not double-init) ---
+if (!process.env.FB_SERVICE_KEY) {
+  console.error(
+    "FB_SERVICE_KEY is missing. Set it in Vercel > Settings > Environment Variables.",
+  );
+}
+
+if (!admin.apps.length && process.env.FB_SERVICE_KEY) {
+  try {
+    const serviceAccount = JSON.parse(
+      Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString("utf8"),
+    );
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  } catch (error) {
+    console.error("Failed to init firebase-admin:", error.message);
+  }
+}
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.lhf2ug2.mongodb.net/?appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+// Reused across warm serverless invocations
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
-    strict: true,
+    strict: false,
     deprecationErrors: true,
   },
 });
 
+let bootPromise;
+const ensureReady = () => {
+  if (!bootPromise) bootPromise = run();
+  return bootPromise;
+};
+
+app.use(async (req, res, next) => {
+  try {
+    await ensureReady();
+    next();
+  } catch (error) {
+    console.error("Boot failed:", error);
+    res.status(500).json({ success: false, message: "Server not ready" });
+  }
+});
+
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
+    // Connect once; the client is cached between warm invocations
     await client.connect();
 
     const db = client.db("pro-curier-db");
@@ -674,18 +699,6 @@ async function run() {
           _id: new ObjectId(id),
         });
         res.send(result);
-
-        // if (result.deletedCount === 0) {
-        //   return res.status(404).json({
-        //     success: false,
-        //     message: "Parcel not found",
-        //   });
-        // }
-
-        // res.json({
-        //   success: true,
-        //   message: "Parcel deleted successfully",
-        // });
       } catch (error) {
         res.status(500).json({
           success: false,
@@ -699,17 +712,35 @@ async function run() {
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
+  } catch (error) {
+    console.error("run() failed:", error);
+    throw error;
   }
 }
-run().catch(console.dir);
-
 // test route
 app.get("/", (req, res) => {
   res.send("Server is running ");
 });
 
-const serverless = require("serverless-http");
+// 404 fallback so unknown paths return JSON, not Vercel's HTML page
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `No route for ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// Local development only. Vercel ignores this and uses the export below.
+if (require.main === module) {
+  ensureReady()
+    .then(() =>
+      app.listen(port, () => console.log(`Server running on ${port}`)),
+    )
+    .catch((error) => {
+      console.error(error);
+      process.exit(1);
+    });
+}
+
 module.exports = serverless(app);
+module.exports.app = app;

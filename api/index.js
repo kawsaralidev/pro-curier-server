@@ -692,7 +692,11 @@ async function run() {
     // await client.close();
   }
 }
-run()
+run();
+app
+  .get("/", (req, res) => {
+    res.send("Server is running");
+  })
   .then(() => {
     app.listen(port, () => {
       console.log(`Server running on ${port}`);

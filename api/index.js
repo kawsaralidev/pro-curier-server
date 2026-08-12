@@ -95,6 +95,95 @@ async function run() {
       res.send(result);
     });
 
+
+    // Current authenticated user's profile
+    app.get("/users/me", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.user.email;
+
+        const user = await userCollection.findOne(
+          { email },
+          {
+            projection: {
+              password: 0,
+            },
+          },
+        );
+
+        if (!user) {
+          return res.status(404).send({
+            message: "User not found",
+          });
+        }
+
+        res.send(user);
+      } catch (error) {
+        console.error("Failed to fetch current user:", error);
+        res.status(500).send({
+          message: "Failed to fetch profile",
+        });
+      }
+    });
+
+    // Update only the authenticated user's editable profile fields.
+    // Email and role remain controlled by authentication/admin APIs.
+    app.patch("/users/me", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.user.email;
+        const { name, displayName, photoUrl, photoURL, phone, address } =
+          req.body;
+
+        const updateFields = {};
+
+        if (name !== undefined) updateFields.name = name;
+        if (displayName !== undefined) updateFields.displayName = displayName;
+        if (photoUrl !== undefined) updateFields.photoUrl = photoUrl;
+        if (photoURL !== undefined) updateFields.photoURL = photoURL;
+        if (phone !== undefined) updateFields.phone = phone;
+        if (address !== undefined) updateFields.address = address;
+
+        if (Object.keys(updateFields).length === 0) {
+          const currentUser = await userCollection.findOne({ email });
+          if (!currentUser) {
+            return res.status(404).send({
+              message: "User not found",
+            });
+          }
+
+          return res.send({
+            message: "No profile changes were provided",
+            user: currentUser,
+          });
+        }
+
+        updateFields.updated_at = new Date().toISOString();
+
+        const result = await userCollection.findOneAndUpdate(
+          { email },
+          { $set: updateFields },
+          { returnDocument: "after" },
+        );
+
+        const updatedUser = result?.value ?? result;
+
+        if (!updatedUser) {
+          return res.status(404).send({
+            message: "User not found",
+          });
+        }
+
+        res.send({
+          message: "Profile updated successfully",
+          user: updatedUser,
+        });
+      } catch (error) {
+        console.error("Failed to update profile:", error);
+        res.status(500).send({
+          message: "Failed to update profile",
+        });
+      }
+    });
+
     app.get("/users/search", async (req, res) => {
       const emailQuery = req.query.email;
 
@@ -189,23 +278,287 @@ async function run() {
       }
     });
 
+
+    // Role-aware dashboard statistics
+    app.get("/dashboard/stats", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.user.email;
+        const currentUser = await userCollection.findOne({ email });
+
+        if (!currentUser) {
+          return res.status(404).send({
+            message: "User not found",
+          });
+        }
+
+        const role = currentUser.role || "user";
+
+        let parcelQuery = {};
+
+        if (role === "user") {
+          parcelQuery = { created_by: email };
+        } else if (role === "rider") {
+          parcelQuery = { assigned_rider_email: email };
+        }
+
+        const [
+          totalParcels,
+          delivered,
+          pending,
+          inTransit,
+          riderAssigned,
+        ] = await Promise.all([
+          parcelsCollection.countDocuments(parcelQuery),
+          parcelsCollection.countDocuments({
+            ...parcelQuery,
+            delivery_status: "delivered",
+          }),
+          parcelsCollection.countDocuments({
+            ...parcelQuery,
+            delivery_status: "pending",
+          }),
+          parcelsCollection.countDocuments({
+            ...parcelQuery,
+            delivery_status: "in_transit",
+          }),
+          parcelsCollection.countDocuments({
+            ...parcelQuery,
+            delivery_status: "rider_assigned",
+          }),
+        ]);
+
+        const statusCounts = await parcelsCollection
+          .aggregate([
+            { $match: parcelQuery },
+            {
+              $group: {
+                _id: "$delivery_status",
+                count: { $sum: 1 },
+              },
+            },
+            {
+              $project: {
+                _id: 0,
+                status: "$_id",
+                count: 1,
+              },
+            },
+            { $sort: { status: 1 } },
+          ])
+          .toArray();
+
+        const paymentQuery =
+          role === "user" ? { email } : role === "admin" ? {} : null;
+
+        let paymentStats = {
+          totalPayments: 0,
+          totalRevenue: 0,
+        };
+
+        if (paymentQuery) {
+          const paymentResult = await paymentCollection
+            .aggregate([
+              { $match: paymentQuery },
+              {
+                $group: {
+                  _id: null,
+                  totalPayments: { $sum: 1 },
+                  totalRevenue: {
+                    $sum: {
+                      $convert: {
+                        input: "$amount",
+                        to: "double",
+                        onError: 0,
+                        onNull: 0,
+                      },
+                    },
+                  },
+                },
+              },
+            ])
+            .toArray();
+
+          paymentStats = {
+            totalPayments: paymentResult[0]?.totalPayments || 0,
+            totalRevenue: paymentResult[0]?.totalRevenue || 0,
+          };
+        }
+
+        const response = {
+          role,
+          totalParcels,
+          delivered,
+          pending,
+          inTransit,
+          riderAssigned,
+          statusCounts,
+          ...paymentStats,
+        };
+
+        if (role === "admin") {
+          const [totalUsers, totalRiders, activeRiders] = await Promise.all([
+            userCollection.countDocuments({}),
+            userCollection.countDocuments({ role: "rider" }),
+            ridersCollection.countDocuments({ status: "approved" }),
+          ]);
+
+          response.totalUsers = totalUsers;
+          response.totalRiders = totalRiders;
+          response.activeRiders = activeRiders;
+        }
+
+        if (role === "rider") {
+          const completed = await parcelsCollection
+            .find({
+              assigned_rider_email: email,
+              delivery_status: {
+                $in: ["delivered", "service_center_delivered"],
+              },
+            })
+            .project({
+              cost: 1,
+              senderDistrict: 1,
+              receiverDistrict: 1,
+            })
+            .toArray();
+
+          const totalEarnings = completed.reduce((sum, parcel) => {
+            const cost = Number(parcel.cost) || 0;
+            const sameDistrict =
+              parcel.senderDistrict === parcel.receiverDistrict;
+            return sum + (sameDistrict ? cost * 0.8 : cost * 0.3);
+          }, 0);
+
+          response.completedDeliveries = completed.length;
+          response.totalEarnings = totalEarnings;
+        }
+
+        res.send(response);
+      } catch (error) {
+        console.error("Failed to load dashboard stats:", error);
+        res.status(500).send({
+          message: "Failed to load dashboard statistics",
+        });
+      }
+    });
+
     // parcel api
+    // Supports the existing filters plus optional search, sorting and pagination.
+    // Legacy requests without page/limit still return the original array shape.
     app.get("/parcels", verifyFBToken, async (req, res) => {
-      const { email, payment_status, delivery_status } = req.query;
-      let query = {};
-      if (email) {
-        query = { created_by: email };
+      try {
+        const {
+          email,
+          payment_status,
+          delivery_status,
+          search,
+          sortBy = "creation_date",
+          sortOrder = "desc",
+          page,
+          limit,
+        } = req.query;
+
+        const query = {};
+
+        if (email) {
+          query.created_by = email;
+        }
+
+        if (payment_status) {
+          query.payment_status = payment_status;
+        }
+
+        if (delivery_status) {
+          query.delivery_status = delivery_status;
+        }
+
+        // Search across the parcel fields that are actually used by the client.
+        if (search && String(search).trim()) {
+          const searchRegex = new RegExp(String(search).trim(), "i");
+
+          query.$or = [
+            { tracking_id: searchRegex },
+            { senderName: searchRegex },
+            { receiverName: searchRegex },
+            { senderEmail: searchRegex },
+            { receiverEmail: searchRegex },
+            { senderDistrict: searchRegex },
+            { receiverDistrict: searchRegex },
+            { type: searchRegex },
+          ];
+        }
+
+        // Only allow known sortable fields so arbitrary MongoDB fields
+        // cannot be supplied through the query string.
+        const allowedSortFields = {
+          creation_date: "creation_date",
+          cost: "cost",
+          payment_status: "payment_status",
+          delivery_status: "delivery_status",
+          tracking_id: "tracking_id",
+        };
+
+        const selectedSortField =
+          allowedSortFields[String(sortBy)] || "creation_date";
+
+        const direction =
+          String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
+
+        const sort = {
+          [selectedSortField]: direction,
+        };
+
+        // Keep the old response shape for existing frontend requests.
+        const hasPagination = page !== undefined || limit !== undefined;
+
+        if (!hasPagination) {
+          const result = await parcelsCollection
+            .find(query)
+            .sort(sort)
+            .toArray();
+
+          return res.send(result);
+        }
+
+        const parsedPage = Number.parseInt(page, 10);
+        const parsedLimit = Number.parseInt(limit, 10);
+
+        const currentPage =
+          Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+
+        const pageSize =
+          Number.isInteger(parsedLimit) && parsedLimit > 0
+            ? Math.min(parsedLimit, 50)
+            : 10;
+
+        const total = await parcelsCollection.countDocuments(query);
+        const totalPages = Math.ceil(total / pageSize);
+
+        const result = await parcelsCollection
+          .find(query)
+          .sort(sort)
+          .skip((currentPage - 1) * pageSize)
+          .limit(pageSize)
+          .toArray();
+
+        return res.send({
+          data: result,
+          pagination: {
+            total,
+            page: currentPage,
+            limit: pageSize,
+            totalPages,
+            hasNextPage: currentPage < totalPages,
+            hasPreviousPage: currentPage > 1 && total > 0,
+          },
+        });
+      } catch (error) {
+        console.error("Failed to fetch parcels:", error);
+        return res.status(500).send({
+          message: "Failed to fetch parcels",
+          error: error.message,
+        });
       }
-      if (payment_status) {
-        query.payment_status = payment_status;
-      }
-      if (delivery_status) {
-        query.delivery_status = delivery_status;
-      }
-      const options = { sort: { createdAt: -1 } }; // lsatest first
-      const cursor = parcelsCollection.find(query, options);
-      const result = await cursor.toArray();
-      res.send(result);
     });
 
     // get a specific parcel by ID
@@ -279,26 +632,123 @@ async function run() {
 
     app.get("/riders/pending", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
+        const { page, limit, search = "" } = req.query;
+        const usePagination = page !== undefined || limit !== undefined || search.trim();
+
+        const baseQuery = { status: "pending" };
+
+        if (!usePagination) {
+          const pendingRiders = await ridersCollection.find(baseQuery).toArray();
+          return res.send(pendingRiders);
+        }
+
+        const currentPage = Math.max(Number.parseInt(page, 10) || 1, 1);
+        const pageLimit = Math.min(
+          Math.max(Number.parseInt(limit, 10) || 10, 1),
+          50,
+        );
+
+        const query = { ...baseQuery };
+        const trimmedSearch = search.trim();
+
+        if (trimmedSearch) {
+          const searchRegex = new RegExp(trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          query.$or = [
+            { name: searchRegex },
+            { email: searchRegex },
+            { phone: searchRegex },
+            { district: searchRegex },
+          ];
+        }
+
+        const total = await ridersCollection.countDocuments(query);
+        const totalPages = Math.ceil(total / pageLimit);
         const pendingRiders = await ridersCollection
-          .find({ status: "pending" })
+          .find(query)
+          .sort({ _id: -1 })
+          .skip((currentPage - 1) * pageLimit)
+          .limit(pageLimit)
           .toArray();
 
-        res.send(pendingRiders);
+        res.send({
+          data: pendingRiders,
+          pagination: {
+            total,
+            page: currentPage,
+            limit: pageLimit,
+            totalPages,
+            hasNextPage: currentPage < totalPages,
+            hasPreviousPage: currentPage > 1,
+          },
+        });
       } catch (error) {
         console.error("Failed to load pending riders:", error);
         res.status(500).send({
           message: "Failed to load pending riders",
+          error: error.message,
         });
       }
     });
 
     // active riders api
     app.get("/riders/active", verifyFBToken, verifyAdmin, async (req, res) => {
-      const result = await ridersCollection
-        .find({ status: "approved" })
-        .toArray();
+      try {
+        const { page, limit, search = "" } = req.query;
+        const usePagination = page !== undefined || limit !== undefined || search.trim();
 
-      res.send(result);
+        const baseQuery = { status: "approved" };
+
+        if (!usePagination) {
+          const result = await ridersCollection.find(baseQuery).toArray();
+          return res.send(result);
+        }
+
+        const currentPage = Math.max(Number.parseInt(page, 10) || 1, 1);
+        const pageLimit = Math.min(
+          Math.max(Number.parseInt(limit, 10) || 10, 1),
+          50,
+        );
+
+        const query = { ...baseQuery };
+        const trimmedSearch = search.trim();
+
+        if (trimmedSearch) {
+          const searchRegex = new RegExp(trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          query.$or = [
+            { name: searchRegex },
+            { email: searchRegex },
+            { phone: searchRegex },
+            { district: searchRegex },
+          ];
+        }
+
+        const total = await ridersCollection.countDocuments(query);
+        const totalPages = Math.ceil(total / pageLimit);
+        const result = await ridersCollection
+          .find(query)
+          .sort({ _id: -1 })
+          .skip((currentPage - 1) * pageLimit)
+          .limit(pageLimit)
+          .toArray();
+
+        res.send({
+          data: result,
+          pagination: {
+            total,
+            page: currentPage,
+            limit: pageLimit,
+            totalPages,
+            hasNextPage: currentPage < totalPages,
+            hasPreviousPage: currentPage > 1,
+          },
+        });
+      } catch (error) {
+        console.error("Failed to load active riders:", error);
+        res.status(500).send({
+          message: "Failed to load active riders",
+          error: error.message,
+        });
+      }
     });
 
     // pending riders updated api
@@ -436,17 +886,65 @@ async function run() {
     app.get("/rider/parcels", verifyFBToken, verifyRider, async (req, res) => {
       try {
         const riderEmail = req.user.email;
+        const { page, limit, search = "" } = req.query;
+        const usePagination = page !== undefined || limit !== undefined || search.trim();
 
+        const baseQuery = {
+          assigned_rider_email: riderEmail,
+          delivery_status: { $in: ["rider_assigned", "in_transit"] },
+        };
+
+        if (!usePagination) {
+          const tasks = await parcelsCollection.find(baseQuery).toArray();
+          return res.send(tasks);
+        }
+
+        const currentPage = Math.max(Number.parseInt(page, 10) || 1, 1);
+        const pageLimit = Math.min(
+          Math.max(Number.parseInt(limit, 10) || 10, 1),
+          50,
+        );
+
+        const query = { ...baseQuery };
+        const trimmedSearch = search.trim();
+
+        if (trimmedSearch) {
+          const searchRegex = new RegExp(trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+          query.$or = [
+            { parcelName: searchRegex },
+            { tracking_id: searchRegex },
+            { sender_name: searchRegex },
+            { receiver_name: searchRegex },
+            { sender_district: searchRegex },
+            { receiver_district: searchRegex },
+          ];
+        }
+
+        const total = await parcelsCollection.countDocuments(query);
+        const totalPages = Math.ceil(total / pageLimit);
         const tasks = await parcelsCollection
-          .find({
-            assigned_rider_email: riderEmail,
-            delivery_status: { $in: ["rider_assigned", "in_transit"] },
-          })
+          .find(query)
+          .sort({ updated_at: -1 })
+          .skip((currentPage - 1) * pageLimit)
+          .limit(pageLimit)
           .toArray();
 
-        res.send(tasks);
+        res.send({
+          data: tasks,
+          pagination: {
+            total,
+            page: currentPage,
+            limit: pageLimit,
+            totalPages,
+            hasNextPage: currentPage < totalPages,
+            hasPreviousPage: currentPage > 1,
+          },
+        });
       } catch (error) {
-        res.status(500).send({ message: "Error" });
+        res.status(500).send({
+          message: "Failed to load rider parcels",
+          error: error.message,
+        });
       }
     });
 
@@ -490,20 +988,66 @@ async function run() {
       async (req, res) => {
         try {
           const riderEmail = req.user.email;
+          const { page, limit, search = "" } = req.query;
+          const usePagination = page !== undefined || limit !== undefined || search.trim();
 
-          const query = {
+          const baseQuery = {
             assigned_rider_email: riderEmail,
             delivery_status: {
               $in: ["delivered", "service_center_delivered"],
             },
           };
 
+          if (!usePagination) {
+            const completedParcels = await parcelsCollection
+              .find(baseQuery)
+              .sort({ updated_at: -1 })
+              .toArray();
+
+            return res.send(completedParcels);
+          }
+
+          const currentPage = Math.max(Number.parseInt(page, 10) || 1, 1);
+          const pageLimit = Math.min(
+            Math.max(Number.parseInt(limit, 10) || 10, 1),
+            50,
+          );
+
+          const query = { ...baseQuery };
+          const trimmedSearch = search.trim();
+
+          if (trimmedSearch) {
+            const searchRegex = new RegExp(trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+            query.$or = [
+              { parcelName: searchRegex },
+              { tracking_id: searchRegex },
+              { sender_name: searchRegex },
+              { receiver_name: searchRegex },
+              { sender_district: searchRegex },
+              { receiver_district: searchRegex },
+            ];
+          }
+
+          const total = await parcelsCollection.countDocuments(query);
+          const totalPages = Math.ceil(total / pageLimit);
           const completedParcels = await parcelsCollection
             .find(query)
             .sort({ updated_at: -1 })
+            .skip((currentPage - 1) * pageLimit)
+            .limit(pageLimit)
             .toArray();
 
-          res.send(completedParcels);
+          res.send({
+            data: completedParcels,
+            pagination: {
+              total,
+              page: currentPage,
+              limit: pageLimit,
+              totalPages,
+              hasNextPage: currentPage < totalPages,
+              hasPreviousPage: currentPage > 1,
+            },
+          });
         } catch (error) {
           console.error("Failed to load completed deliveries:", error);
           res.status(500).send({
